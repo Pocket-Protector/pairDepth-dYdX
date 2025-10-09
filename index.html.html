@@ -1,0 +1,623 @@
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>dYdX Liquidity Analysis</title>
+            <style>
+        body { background: #0f1115; color: #d7dce2; font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; margin: 20px; }
+        h1 { font-size: 22px; font-weight: 700; margin: 8px 0 16px; }
+        .controls { margin-bottom: 12px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; justify-content: space-between; }
+        .controls button { background: #1e222b; color: #e6edf3; border: 1px solid #2a2f3b; padding: 8px 12px; border-radius: 8px; cursor: pointer; }
+        .controls input, .controls select { background: #0f1115; color: #e6edf3; border: 1px solid #2a2f3b; padding: 8px 10px; border-radius: 8px; }
+        .muted { color: #8b949e; font-size: 12px; }
+        .loading { margin: 12px 0; color: #8b949e; }
+        .error { color: #ff6b6b; margin: 12px 0; }
+        .summary { display: flex; gap: 16px; flex-wrap: wrap; margin: 8px 0 4px; }
+        .summary-item { background: #10131a; border: 1px solid #2a2f3b; padding: 8px 12px; border-radius: 8px; font-size: 13px; }
+        .progress-wrap { display: flex; align-items: center; gap: 10px; min-width: 280px; }
+        .progress { width: 200px; height: 8px; background: #1a1f2a; border-radius: 999px; overflow: hidden; border: 1px solid #273040; }
+        .progress > span { display: block; height: 100%; width: 0%; background: linear-gradient(90deg, #2a7cff, #7d9cff); transition: width .2s ease; }
+        table { width: 100%; border-collapse: collapse; background: #0f1115; }
+        thead th { position: sticky; top: 0; background: #0f1115; border-bottom: 1px solid #272b35; padding: 12px 14px; font-weight: 600; color: #a6aeb9; text-align: left; cursor: pointer; user-select: none; font-size: 14px; }
+        thead th:hover { background: #151921; }
+        thead th.sortable::after { content: ' ⇅'; opacity: 0.3; }
+        thead th.sorted-asc::after { content: ' ↑'; opacity: 1; }
+        thead th.sorted-desc::after { content: ' ↓'; opacity: 1; }
+        tbody td { border-bottom: 1px solid #1a1e27; padding: 12px 14px; font-size: 14px; }
+        .right { text-align: right; font-variant-numeric: tabular-nums; font-size: 14px; }
+        .main-row { background: #10131a; cursor: pointer; font-size: 15px; }
+        .main-row:hover { background: #131824; }
+        .pair { display: inline-flex; align-items: center; gap: 8px; }
+        .caret { display: inline-block; width: 10px; height: 10px; border-right: 2px solid #778090; border-bottom: 2px solid #778090; transform: rotate(-45deg); transition: transform .15s ease; margin-right: 8px; }
+        .expanded .caret { transform: rotate(45deg); }
+        .sub-row { background: #0c0f14; display: none; }
+        .sub-row td { padding: 12px 14px !important; border-bottom: 1px solid #1a1e27 !important; }
+        .depth-breakdown { display: flex; gap: 16px; justify-content: flex-end; }
+        .depth-item { display: flex; align-items: center; gap: 8px; }
+        .depth-item-label { color: #8b949e; font-size: 12px; text-transform: uppercase; letter-spacing: .02em; }
+        .depth-item-value { font-variant-numeric: tabular-nums; font-size: 14px; font-weight: 600; }
+        .bid { color: #ff9b9b; }
+        .ask { color: #7ee787; }
+        .group-row td { background: #0b0e13; border-bottom: 1px solid #222836; color: #a6aeb9; font-weight: 600; font-size: 13px; padding-top: 16px; }
+        .group-sub { color: #8b949e; font-weight: 400; font-size: 12px; margin-left: 8px; }
+            </style>
+        </head>
+        <body>
+            <h1>dYdX Liquidity Analysis</h1>
+    <div class="controls">
+        <div class="left-controls" style="display:flex;gap:12px;align-items:center;">
+            <button id="refreshBtn">Refresh</button>
+            <label>
+                Number format:
+                <select id="formatSelect">
+                    <option value="full" selected>Full</option>
+                    <option value="compact">K / M / B</option>
+                </select>
+            </label>
+        </div>
+        <div class="progress-wrap">
+            <div class="progress"><span id="pbInner"></span></div>
+            <div class="muted" id="pbText">Idle</div>
+        </div>
+    </div>
+    <div class="summary" id="summaryBar">
+        <div class="summary-item" id="sumMarkets">Total markets: -</div>
+        <div class="summary-item" id="sumDepth05">Total 0.5% depth: -</div>
+        <div class="summary-item" id="sumDepth1">Total 1% depth: -</div>
+        <div class="summary-item" id="sumDepth2">Total 2% depth: -</div>
+        <div class="summary-item" id="sumDepth5">Total 5% depth: -</div>
+    </div>
+    <div class="muted" style="margin-bottom:8px;">Filters: excluding inactive (FINAL_SETTLEMENT) and low-volume markets (24h volume < $1,000).</div>
+    <div id="loading" class="loading" style="display:none;">Loading markets and orderbooks...</div>
+    <div id="error" class="error" style="display:none;"></div>
+            <table>
+                <thead>
+                    <tr>
+                <th class="sortable" data-column="ticker">Ticker</th>
+                <th class="sortable right" data-column="volume24h">24h Volume</th>
+                <th class="sortable right" data-column="oiUsd">Open Interest (USD)</th>
+                <th class="sortable right" data-column="mid">Mid Price</th>
+                <th class="sortable right" data-column="depth0.5">0.5% Depth</th>
+                <th class="sortable right" data-column="depth1">1% Depth</th>
+                <th class="sortable right" data-column="depth2">2% Depth</th>
+                <th class="sortable right" data-column="depth5">5% Depth</th>
+                    </tr>
+                </thead>
+        <tbody id="tableBody"></tbody>
+    </table>
+    <script>
+        const BASE_URL = 'https://indexer.dydx.trade/v4';
+        const MARKETS_PATH = '/perpetualMarkets';
+        const ORDERBOOK_PATH_TMPL = '/orderbooks/perpetualMarket/{market}';
+        const BANDS = [0.5, 1.0, 2.0, 5.0];
+
+        let formatMode = 'full';
+
+        function fmtNum(x) {
+            if (x === null || x === undefined || Number.isNaN(x)) return '';
+            const n = Number(x);
+            if (!Number.isFinite(n)) return '';
+            return n.toLocaleString(undefined, { maximumFractionDigits: 6 });
+        }
+
+        function fmtUsd(n) {
+            if (n === null || n === undefined || Number.isNaN(n)) return '';
+            const num = Number(n);
+            if (!Number.isFinite(num)) return '';
+            const opts = {
+                style: 'currency',
+                currency: 'USD',
+                maximumFractionDigits: formatMode === 'compact' ? 2 : 2,
+                notation: formatMode === 'compact' ? 'compact' : 'standard',
+                compactDisplay: 'short'
+            };
+            return new Intl.NumberFormat(undefined, opts).format(num);
+        }
+
+        // Precise USD formatting for prices (no compact, up to 6 decimals). Display-only; calculations use raw numbers.
+        function fmtUsdMid(n) {
+            if (n === null || n === undefined || Number.isNaN(n)) return '';
+            const num = Number(n);
+            if (!Number.isFinite(num)) return '';
+            const opts = {
+                style: 'currency',
+                currency: 'USD',
+                maximumFractionDigits: 6,
+                notation: 'standard'
+            };
+            return new Intl.NumberFormat(undefined, opts).format(num);
+        }
+
+        function joinUrl(base, path) {
+            return (base.endsWith('/') ? base.slice(0, -1) : base) + (path.startsWith('/') ? path : '/' + path);
+        }
+
+        async function fetchJson(url) {
+            const res = await fetch(url, { method: 'GET' });
+            if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+            return await res.json();
+        }
+
+        function computeMid(bids, asks) {
+            if (!bids.length || !asks.length) return NaN;
+            const bestBid = bids.reduce((m, r) => Math.max(m, Number(r.price)), -Infinity);
+            const bestAsk = asks.reduce((m, r) => Math.min(m, Number(r.price)), Infinity);
+            return (bestBid + bestAsk) / 2;
+        }
+
+        function accumulateDepth(bids, asks, mid, pct) {
+            const lower = mid * (1 - pct);
+            const upper = mid * (1 + pct);
+            let bidNotional = 0;
+            let askNotional = 0;
+
+            for (const b of bids) {
+                const price = Number(b.price);
+                const size = Number(b.size);
+                if (Number.isFinite(price) && Number.isFinite(size) && price >= lower) {
+                    bidNotional += price * size;
+                }
+            }
+
+            for (const a of asks) {
+                const price = Number(a.price);
+                const size = Number(a.size);
+                if (Number.isFinite(price) && Number.isFinite(size) && price <= upper) {
+                    askNotional += price * size;
+                }
+            }
+
+            return { bidNotional, askNotional, total: bidNotional + askNotional };
+        }
+
+        function makeMainRow(pair, mid, totals, volume24h, oiUsd) {
+            const tr = document.createElement('tr');
+            tr.className = 'main-row market-row';
+            tr.dataset.pair = pair;
+            tr.dataset.mid = mid;
+            tr.dataset.depth05 = totals[0.5];
+            tr.dataset.depth1 = totals[1.0];
+            tr.dataset.depth2 = totals[2.0];
+            tr.dataset.depth5 = totals[5.0];
+            tr.dataset.volume24h = volume24h || 0;
+            tr.dataset.oiUsd = oiUsd || 0;
+            tr.onclick = () => toggleDetails(pair, tr);
+            tr.innerHTML = `
+                <td><span class="pair"><span class="caret"></span><strong>${pair}</strong></span></td>
+                <td class="right">${fmtUsd(volume24h)}</td>
+                <td class="right">${fmtUsd(oiUsd)}</td>
+                <td class="right">${fmtUsdMid(mid)}</td>
+                <td class="right">${fmtUsd(totals[0.5])}</td>
+                <td class="right">${fmtUsd(totals[1.0])}</td>
+                <td class="right">${fmtUsd(totals[2.0])}</td>
+                <td class="right">${fmtUsd(totals[5.0])}</td>
+            `;
+            return tr;
+        }
+
+        function makeTotalsSubRow(pair, totals) {
+            const tr = document.createElement('tr');
+            tr.className = 'sub-row market-row';
+            tr.id = `details-${pair}`;
+            tr.innerHTML = `
+                <td></td>
+                <td></td>
+                <td></td>
+                <td>
+                    <div class="depth-breakdown">
+                        <div class="depth-item">
+                            <span class="depth-item-label">asks</span>
+                            <span class="depth-item-value ask">${fmtUsd(totals[0.5].ask)}</span>
+                                    </div>
+                        <div class="depth-item">
+                            <span class="depth-item-label">bids</span>
+                            <span class="depth-item-value bid">${fmtUsd(totals[0.5].bid)}</span>
+                                </div>
+                            </div>
+                        </td>
+                <td>
+                    <div class="depth-breakdown">
+                        <div class="depth-item">
+                            <span class="depth-item-label">asks</span>
+                            <span class="depth-item-value ask">${fmtUsd(totals[1.0].ask)}</span>
+                                    </div>
+                        <div class="depth-item">
+                            <span class="depth-item-label">bids</span>
+                            <span class="depth-item-value bid">${fmtUsd(totals[1.0].bid)}</span>
+                                </div>
+                            </div>
+                        </td>
+                <td>
+                    <div class="depth-breakdown">
+                        <div class="depth-item">
+                            <span class="depth-item-label">asks</span>
+                            <span class="depth-item-value ask">${fmtUsd(totals[2.0].ask)}</span>
+                                    </div>
+                        <div class="depth-item">
+                            <span class="depth-item-label">bids</span>
+                            <span class="depth-item-value bid">${fmtUsd(totals[2.0].bid)}</span>
+                                </div>
+                            </div>
+                        </td>
+                <td>
+                    <div class="depth-breakdown">
+                        <div class="depth-item">
+                            <span class="depth-item-label">asks</span>
+                            <span class="depth-item-value ask">${fmtUsd(totals[5.0].ask)}</span>
+                                    </div>
+                        <div class="depth-item">
+                            <span class="depth-item-label">bids</span>
+                            <span class="depth-item-value bid">${fmtUsd(totals[5.0].bid)}</span>
+                                </div>
+                            </div>
+                        </td>
+            `;
+            return tr;
+        }
+
+        function toggleDetails(pair, mainRow) {
+            document.querySelectorAll('tr.sub-row.market-row').forEach(r => {
+                if (r.id !== `details-${pair}`) r.style.display = 'none';
+            });
+            document.querySelectorAll('tr.main-row.market-row').forEach(r => {
+                if (r !== mainRow) r.classList.remove('expanded');
+            });
+
+            const row = document.getElementById(`details-${pair}`);
+            if (row) {
+                const newDisplay = row.style.display === 'table-row' ? 'none' : 'table-row';
+                row.style.display = newDisplay;
+                if (newDisplay === 'table-row') mainRow.classList.add('expanded');
+                else mainRow.classList.remove('expanded');
+            }
+        }
+
+        let cachedData = [];
+
+        function renderTable(data) {
+            const tbody = document.getElementById('tableBody');
+            tbody.innerHTML = '';
+            data.forEach(item => {
+                const mainRow = makeMainRow(item.pair, item.mid, item.totals, item.volume24h, item.oiUsd);
+                if (item.group) mainRow.dataset.group = item.group;
+                tbody.appendChild(mainRow);
+                const subRow = makeTotalsSubRow(item.pair, item.bandTotals);
+                tbody.appendChild(subRow);
+            });
+            updateSummary(data);
+        }
+
+        function appendRow(item) {
+            const tbody = document.getElementById('tableBody');
+            const mainRow = makeMainRow(item.pair, item.mid, item.totals, item.volume24h, item.oiUsd);
+            if (item.group) mainRow.dataset.group = item.group;
+            tbody.appendChild(mainRow);
+            const subRow = makeTotalsSubRow(item.pair, item.bandTotals);
+            tbody.appendChild(subRow);
+        }
+
+        function makeGroupHeader(title, subtitle) {
+            const tr = document.createElement('tr');
+            tr.className = 'group-row';
+            tr.innerHTML = `<td colspan="8">${title} <span class="group-sub">${subtitle}</span></td>`;
+            return tr;
+        }
+
+        function getGroupSubtitle(group) {
+            if (group === 'Group 1') return 'BTC-USD and ETH-USD';
+            if (group === 'Group 2') return 'Volume rank 3–10';
+            if (group === 'Group 3') return 'Volume rank 11–30';
+            return 'Volume rank 31+';
+        }
+
+        function renderFromCache() {
+            const tbody = document.getElementById('tableBody');
+            tbody.innerHTML = '';
+            const order = ['Group 1', 'Group 2', 'Group 3', 'Group 4'];
+
+            const valOf = (it) => {
+                switch (sortState.column) {
+                    case 'ticker': return it.pair;
+                    case 'volume24h': return Number(it.volume24h || 0);
+                    case 'oiUsd': return Number(it.oiUsd || 0);
+                    case 'mid': return Number(it.mid || 0);
+                    case 'depth0.5': return Number(it.totals[0.5] || 0);
+                    case 'depth1': return Number(it.totals[1.0] || 0);
+                    case 'depth2': return Number(it.totals[2.0] || 0);
+                    case 'depth5': return Number(it.totals[5.0] || 0);
+                    default: return 0;
+                }
+            };
+
+            for (const g of order) {
+                const items = cachedData.filter(x => x.group === g);
+                if (!items.length) continue;
+                tbody.appendChild(makeGroupHeader(g, getGroupSubtitle(g)));
+                if (sortState.column) {
+                    items.sort((a, b) => {
+                        const av = valOf(a), bv = valOf(b);
+                        if (sortState.column === 'ticker') {
+                            return sortState.direction === 'asc' ? String(av).localeCompare(String(bv)) : String(bv).localeCompare(String(av));
+                        }
+                        return sortState.direction === 'asc' ? av - bv : bv - av;
+                    });
+                }
+                for (const it of items) {
+                    const mainRow = makeMainRow(it.pair, it.mid, it.totals, it.volume24h, it.oiUsd);
+                    mainRow.dataset.group = g;
+                    tbody.appendChild(mainRow);
+                    const subRow = makeTotalsSubRow(it.pair, it.bandTotals);
+                    tbody.appendChild(subRow);
+                }
+            }
+
+            // Rebind expand handlers
+            document.querySelectorAll('tr.main-row.market-row').forEach(tr => {
+                const pair = tr.dataset.pair;
+                tr.onclick = () => toggleDetails(pair, tr);
+            });
+        }
+
+        function updateSummary(data) {
+            const totals = { m: data.length, d05: 0, d1: 0, d2: 0, d5: 0 };
+            for (const it of data) {
+                totals.d05 += Number(it.totals[0.5] || 0);
+                totals.d1 += Number(it.totals[1.0] || 0);
+                totals.d2 += Number(it.totals[2.0] || 0);
+                totals.d5 += Number(it.totals[5.0] || 0);
+            }
+            document.getElementById('sumMarkets').textContent = `Total markets: ${totals.m}`;
+            document.getElementById('sumDepth05').textContent = `Total 0.5% depth: ${fmtUsd(totals.d05)}`;
+            document.getElementById('sumDepth1').textContent = `Total 1% depth: ${fmtUsd(totals.d1)}`;
+            document.getElementById('sumDepth2').textContent = `Total 2% depth: ${fmtUsd(totals.d2)}`;
+            document.getElementById('sumDepth5').textContent = `Total 5% depth: ${fmtUsd(totals.d5)}`;
+        }
+
+        async function loadData() {
+            const loading = document.getElementById('loading');
+            const error = document.getElementById('error');
+            loading.style.display = 'block';
+            error.style.display = 'none';
+            error.textContent = '';
+            cachedData = [];
+            const pbInner = document.getElementById('pbInner');
+            const pbText = document.getElementById('pbText');
+            pbInner.style.width = '0%';
+            pbText.textContent = 'Fetching markets...';
+
+            try {
+                const marketsUrl = joinUrl(BASE_URL, MARKETS_PATH);
+                const marketsJson = await fetchJson(marketsUrl);
+                const marketIds = marketsJson && marketsJson.markets ? Object.keys(marketsJson.markets) : [];
+                // Filter out inactive pairs (status: FINAL_SETTLEMENT)
+                const marketsMap = marketsJson.markets || {};
+                const activeIds = marketIds.filter(t => {
+                    const m = marketsMap[t] || {};
+                    const status = (m.status || '').toUpperCase();
+                    const vol = Number(m.volume24H || 0);
+                    return status !== 'FINAL_SETTLEMENT' && vol >= 1000;
+                });
+                // Sort by 24h volume desc
+                const sorted = activeIds
+                    .map(t => ({ ticker: t, volume: Number((marketsMap[t] || {}).volume24H || 0) }))
+                    .sort((a, b) => b.volume - a.volume)
+                    .map(o => o.ticker);
+
+                // Assign groups by rank (1-based), with Group 1 overridden for BTC-USD and ETH-USD
+                const groupMap = new Map();
+                const g1Set = new Set(['BTC-USD', 'ETH-USD']);
+                sorted.forEach((t, i) => {
+                    if (g1Set.has(t)) {
+                        groupMap.set(t, 'Group 1');
+                    } else {
+                        const rank = i + 1;
+                        if (rank >= 3 && rank <= 10) groupMap.set(t, 'Group 2');
+                        else if (rank >= 11 && rank <= 30) groupMap.set(t, 'Group 3');
+                        else groupMap.set(t, 'Group 4');
+                    }
+                });
+
+                const selected = sorted; // load all active by volume order
+                const total = selected.length;
+
+                let idx = 0;
+                const zeroTickers = [];
+                const insertedGroups = new Set();
+                for (const pair of selected) {
+                    // Insert group header when encountering the first ticker of a group
+                    const group = groupMap.get(pair) || 'Group 4';
+                    if (!insertedGroups.has(group)) {
+                        const title = group;
+                        let subtitle = '';
+                        if (group === 'Group 1') subtitle = 'BTC-USD and ETH-USD';
+                        else if (group === 'Group 2') subtitle = 'Volume rank 3–10';
+                        else if (group === 'Group 3') subtitle = 'Volume rank 11–30';
+                        else subtitle = 'Volume rank 31+';
+                        document.getElementById('tableBody').appendChild(makeGroupHeader(title, subtitle));
+                        insertedGroups.add(group);
+                    }
+                    const obUrl = joinUrl(BASE_URL, ORDERBOOK_PATH_TMPL.replace('{market}', encodeURIComponent(pair)));
+                    let ob;
+                    try {
+                        ob = await fetchJson(obUrl);
+                    } catch (e) {
+                        const tr = document.createElement('tr');
+                        tr.className = 'main-row market-row';
+                        tr.innerHTML = `<td><strong>${pair}</strong></td><td colspan="5" class="muted">Orderbook error</td>`;
+                        tbody.appendChild(tr);
+                        continue;
+                    }
+
+                    const bids = Array.isArray(ob.bids) ? ob.bids : [];
+                    const asks = Array.isArray(ob.asks) ? ob.asks : [];
+                    const mid = computeMid(bids, asks);
+                    const totals = {};
+                    const details = {};
+
+                    for (const pct of BANDS) {
+                        const depth = accumulateDepth(bids, asks, mid, pct / 100);
+                        totals[pct] = depth.total;
+                        details[pct] = depth;
+                    }
+
+                    const marketMeta = marketsMap[pair] || {};
+                    const oiUsd = Number(marketMeta.openInterest || 0) * Number(marketMeta.oraclePrice || 0);
+                    const volume24h = Number(marketMeta.volume24H || 0);
+                    const entry = {
+                        pair,
+                        mid,
+                        totals,
+                        volume24h,
+                        oiUsd,
+                        bandTotals: {
+                        0.5: { ask: details[0.5].askNotional, bid: details[0.5].bidNotional },
+                        1.0: { ask: details[1.0].askNotional, bid: details[1.0].bidNotional },
+                        2.0: { ask: details[2.0].askNotional, bid: details[2.0].bidNotional },
+                        5.0: { ask: details[5.0].askNotional, bid: details[5.0].bidNotional }
+                        },
+                        group
+                    };
+                    cachedData.push(entry);
+                    appendRow(entry); // incrementally render row
+                    const allZero = Object.values(entry.totals).every(v => Number(v) === 0);
+                    if (allZero) zeroTickers.push(pair);
+                    idx += 1;
+                    pbInner.style.width = `${Math.round((idx/total)*100)}%`;
+                    pbText.textContent = `Loading ${idx}/${total} markets...`;
+                }
+                updateSummary(cachedData);
+                if (zeroTickers.length) {
+                    await retryZeroTickers(zeroTickers, 3);
+                }
+            } catch (e) {
+                error.textContent = String(e);
+                error.style.display = 'block';
+            } finally {
+                loading.style.display = 'none';
+                document.getElementById('pbText').textContent = 'Done';
+            }
+        }
+
+        async function retryZeroTickers(tickers, attempts) {
+            const pbInner = document.getElementById('pbInner');
+            const pbText = document.getElementById('pbText');
+            for (let a = 1; a <= attempts && tickers.length; a++) {
+                pbText.textContent = `Retry pass ${a}/${attempts} for ${tickers.length} tickers...`;
+                const stillZero = [];
+                let done = 0;
+                for (const pair of tickers) {
+                    try {
+                        const obUrl = joinUrl(BASE_URL, ORDERBOOK_PATH_TMPL.replace('{market}', encodeURIComponent(pair)));
+                        const ob = await fetchJson(obUrl);
+                        const bids = Array.isArray(ob.bids) ? ob.bids : [];
+                        const asks = Array.isArray(ob.asks) ? ob.asks : [];
+                        const mid = computeMid(bids, asks);
+                        const totals = {};
+                        const details = {};
+                        for (const pct of BANDS) {
+                            const depth = accumulateDepth(bids, asks, mid, pct / 100);
+                            totals[pct] = depth.total;
+                            details[pct] = depth;
+                        }
+                        const entry = cachedData.find(e => e.pair === pair);
+                        if (entry) {
+                            entry.mid = mid;
+                            entry.totals = totals;
+                            entry.bandTotals = {
+                                0.5: { ask: details[0.5].askNotional, bid: details[0.5].bidNotional },
+                                1.0: { ask: details[1.0].askNotional, bid: details[1.0].bidNotional },
+                                2.0: { ask: details[2.0].askNotional, bid: details[2.0].bidNotional },
+                                5.0: { ask: details[5.0].askNotional, bid: details[5.0].bidNotional }
+                            };
+                            updateRow(pair, entry);
+                        }
+                        const allZero = Object.values(totals).every(v => Number(v) === 0);
+                        if (allZero) stillZero.push(pair);
+                    } catch (_) {
+                        stillZero.push(pair);
+                    }
+                    done += 1;
+                    pbInner.style.width = `${Math.round((done/tickers.length)*100)}%`;
+                }
+                tickers = stillZero;
+            }
+            updateSummary(cachedData);
+        }
+
+        function updateRow(pair, entry) {
+            const mainRow = document.querySelector(`tr.main-row[data-pair="${pair}"]`);
+            const subRow = document.getElementById(`details-${pair}`);
+            if (!mainRow || !subRow) return;
+            mainRow.dataset.mid = entry.mid;
+            mainRow.dataset.depth05 = entry.totals[0.5];
+            mainRow.dataset.depth1 = entry.totals[1.0];
+            mainRow.dataset.depth2 = entry.totals[2.0];
+            mainRow.dataset.depth5 = entry.totals[5.0];
+            // children: [ticker, volume24h, oiUsd, mid, 0.5, 1, 2, 5]
+            mainRow.children[1].innerHTML = fmtUsd(entry.volume24h);
+            mainRow.children[2].innerHTML = fmtUsd(entry.oiUsd);
+            mainRow.children[3].innerHTML = fmtUsdMid(entry.mid);
+            mainRow.children[4].innerHTML = fmtUsd(entry.totals[0.5]);
+            mainRow.children[5].innerHTML = fmtUsd(entry.totals[1.0]);
+            mainRow.children[6].innerHTML = fmtUsd(entry.totals[2.0]);
+            mainRow.children[7].innerHTML = fmtUsd(entry.totals[5.0]);
+            subRow.children[2].querySelector('.ask').textContent = fmtUsd(entry.bandTotals[0.5].ask);
+            subRow.children[2].querySelector('.bid').textContent = fmtUsd(entry.bandTotals[0.5].bid);
+            subRow.children[3].querySelector('.ask').textContent = fmtUsd(entry.bandTotals[1.0].ask);
+            subRow.children[3].querySelector('.bid').textContent = fmtUsd(entry.bandTotals[1.0].bid);
+            subRow.children[4].querySelector('.ask').textContent = fmtUsd(entry.bandTotals[2.0].ask);
+            subRow.children[4].querySelector('.bid').textContent = fmtUsd(entry.bandTotals[2.0].bid);
+            subRow.children[5].querySelector('.ask').textContent = fmtUsd(entry.bandTotals[5.0].ask);
+            subRow.children[5].querySelector('.bid').textContent = fmtUsd(entry.bandTotals[5.0].bid);
+        }
+
+        let sortState = { column: null, direction: 'asc' };
+
+        function sortTable(column) {
+            // Update sort state and rebuild from cached data instead of shuffling live nodes
+
+            if (sortState.column === column) {
+                sortState.direction = sortState.direction === 'asc' ? 'desc' : 'asc';
+            } else {
+                sortState.column = column;
+                sortState.direction = 'asc';
+            }
+
+            renderFromCache();
+            
+
+            document.querySelectorAll('thead th').forEach(th => {
+                th.classList.remove('sorted-asc', 'sorted-desc');
+            });
+            const activeHeader = document.querySelector(`thead th[data-column="${column}"]`);
+            if (activeHeader) {
+                activeHeader.classList.add(sortState.direction === 'asc' ? 'sorted-asc' : 'sorted-desc');
+            }
+
+            // Rebind row click handlers after DOM shuffling (in case listeners were dropped)
+            document.querySelectorAll('tr.main-row.market-row').forEach(tr => {
+                const pair = tr.dataset.pair;
+                tr.onclick = () => toggleDetails(pair, tr);
+            });
+        }
+
+        document.querySelectorAll('thead th.sortable').forEach(th => {
+            th.addEventListener('click', () => {
+                const column = th.dataset.column;
+                sortTable(column);
+            });
+        });
+
+        document.getElementById('refreshBtn').addEventListener('click', loadData);
+        document.getElementById('formatSelect').addEventListener('change', (e) => {
+            formatMode = e.target.value;
+            if (cachedData.length) {
+                // Re-render with new format without refetching
+                const open = document.querySelector('tr.sub-row[style*="table-row"]');
+                renderTable(cachedData);
+                // Keep accordion state collapsed by default after re-render
+            }
+        });
+        loadData();
+            </script>
+        </body>
+        </html>
