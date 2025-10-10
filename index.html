@@ -67,6 +67,7 @@
         <div class="summary-item" id="sumDepth5">Total 5% depth: -</div>
     </div>
     <div class="muted" style="margin-bottom:8px;">Filters: excluding inactive (FINAL_SETTLEMENT) and low-volume markets (24h volume < $1,000).</div>
+    <div class="muted" id="samplingInfo" style="margin-bottom:8px;"></div>
     <div id="loading" class="loading" style="display:none;">Loading markets and orderbooks...</div>
     <div id="error" class="error" style="display:none;"></div>
             <table>
@@ -89,6 +90,14 @@
         const MARKETS_PATH = '/perpetualMarkets';
         const ORDERBOOK_PATH_TMPL = '/orderbooks/perpetualMarket/{market}';
         const BANDS = [0.5, 1.0, 2.0, 5.0];
+
+        // Sampling configuration to stabilize depth estimates
+        const SAMPLING = {
+            enabled: true,      // toggle averaging on/off
+            samples: 12,        // number of snapshots per ticker
+            intervalMs: 400,    // delay between snapshots (ms)
+            retrySamples: 16    // samples used during zero-depth retries
+        };
 
         let formatMode = 'full';
 
@@ -131,6 +140,16 @@
             return (base.endsWith('/') ? base.slice(0, -1) : base) + (path.startsWith('/') ? path : '/' + path);
         }
 
+        function renderSamplingInfo() {
+            const el = document.getElementById('samplingInfo');
+            if (!el) return;
+            if (SAMPLING.enabled) {
+                el.textContent = `Depth smoothing: averaging ${SAMPLING.samples} snapshots per market, ${SAMPLING.intervalMs}ms apart (retries use ${SAMPLING.retrySamples}).`;
+            } else {
+                el.textContent = `Depth smoothing: off (single snapshot per market).`;
+            }
+        }
+
         async function fetchJson(url) {
             const res = await fetch(url, { method: 'GET' });
             if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
@@ -167,6 +186,58 @@
             }
 
             return { bidNotional, askNotional, total: bidNotional + askNotional };
+        }
+
+        function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+        async function computeAveragedDepth(pair, samples, intervalMs) {
+            const totalsSum = {};
+            const bidsSum = {};
+            const asksSum = {};
+            for (const pct of BANDS) {
+                totalsSum[pct] = 0;
+                bidsSum[pct] = 0;
+                asksSum[pct] = 0;
+            }
+
+            let midSum = 0;
+            let ok = 0;
+
+            for (let i = 0; i < samples; i++) {
+                try {
+                    const obUrl = joinUrl(BASE_URL, ORDERBOOK_PATH_TMPL.replace('{market}', encodeURIComponent(pair)));
+                    const ob = await fetchJson(obUrl);
+                    const bids = Array.isArray(ob.bids) ? ob.bids : [];
+                    const asks = Array.isArray(ob.asks) ? ob.asks : [];
+                    const mid = computeMid(bids, asks);
+                    if (!Number.isFinite(mid)) {
+                        // skip this sample
+                    } else {
+                        ok += 1;
+                        midSum += mid;
+                        for (const pct of BANDS) {
+                            const depth = accumulateDepth(bids, asks, mid, pct / 100);
+                            totalsSum[pct] += depth.total;
+                            bidsSum[pct] += depth.bidNotional;
+                            asksSum[pct] += depth.askNotional;
+                        }
+                    }
+                } catch (_) {
+                    // skip this sample
+                }
+                if (i < samples - 1) await sleep(intervalMs);
+            }
+
+            if (!ok) throw new Error('No successful orderbook snapshots');
+
+            const mid = midSum / ok;
+            const totals = {};
+            const bandTotals = {};
+            for (const pct of BANDS) {
+                totals[pct] = totalsSum[pct] / ok;
+                bandTotals[pct] = { ask: asksSum[pct] / ok, bid: bidsSum[pct] / ok };
+            }
+            return { mid, totals, bandTotals };
         }
 
         function makeMainRow(pair, mid, totals, volume24h, oiUsd) {
@@ -435,28 +506,38 @@
                         document.getElementById('tableBody').appendChild(makeGroupHeader(title, subtitle));
                         insertedGroups.add(group);
                     }
-                    const obUrl = joinUrl(BASE_URL, ORDERBOOK_PATH_TMPL.replace('{market}', encodeURIComponent(pair)));
-                    let ob;
+                    let mid, totals, details;
                     try {
-                        ob = await fetchJson(obUrl);
+                        if (SAMPLING.enabled) {
+                            const averaged = await computeAveragedDepth(pair, SAMPLING.samples, SAMPLING.intervalMs);
+                            mid = averaged.mid;
+                            totals = averaged.totals;
+                            details = {
+                                0.5: { bidNotional: averaged.bandTotals[0.5].bid, askNotional: averaged.bandTotals[0.5].ask },
+                                1.0: { bidNotional: averaged.bandTotals[1.0].bid, askNotional: averaged.bandTotals[1.0].ask },
+                                2.0: { bidNotional: averaged.bandTotals[2.0].bid, askNotional: averaged.bandTotals[2.0].ask },
+                                5.0: { bidNotional: averaged.bandTotals[5.0].bid, askNotional: averaged.bandTotals[5.0].ask }
+                            };
+                        } else {
+                            const obUrl = joinUrl(BASE_URL, ORDERBOOK_PATH_TMPL.replace('{market}', encodeURIComponent(pair)));
+                            const ob = await fetchJson(obUrl);
+                            const bids = Array.isArray(ob.bids) ? ob.bids : [];
+                            const asks = Array.isArray(ob.asks) ? ob.asks : [];
+                            mid = computeMid(bids, asks);
+                            totals = {};
+                            details = {};
+                            for (const pct of BANDS) {
+                                const depth = accumulateDepth(bids, asks, mid, pct / 100);
+                                totals[pct] = depth.total;
+                                details[pct] = depth;
+                            }
+                        }
                     } catch (e) {
                         const tr = document.createElement('tr');
                         tr.className = 'main-row market-row';
                         tr.innerHTML = `<td><strong>${pair}</strong></td><td colspan="5" class="muted">Orderbook error</td>`;
                         tbody.appendChild(tr);
                         continue;
-                    }
-
-                    const bids = Array.isArray(ob.bids) ? ob.bids : [];
-                    const asks = Array.isArray(ob.asks) ? ob.asks : [];
-                    const mid = computeMid(bids, asks);
-                    const totals = {};
-                    const details = {};
-
-                    for (const pct of BANDS) {
-                        const depth = accumulateDepth(bids, asks, mid, pct / 100);
-                        totals[pct] = depth.total;
-                        details[pct] = depth;
                     }
 
                     const marketMeta = marketsMap[pair] || {};
@@ -506,17 +587,30 @@
                 let done = 0;
                 for (const pair of tickers) {
                     try {
-                        const obUrl = joinUrl(BASE_URL, ORDERBOOK_PATH_TMPL.replace('{market}', encodeURIComponent(pair)));
-                        const ob = await fetchJson(obUrl);
-                        const bids = Array.isArray(ob.bids) ? ob.bids : [];
-                        const asks = Array.isArray(ob.asks) ? ob.asks : [];
-                        const mid = computeMid(bids, asks);
-                        const totals = {};
-                        const details = {};
-                        for (const pct of BANDS) {
-                            const depth = accumulateDepth(bids, asks, mid, pct / 100);
-                            totals[pct] = depth.total;
-                            details[pct] = depth;
+                        let mid, totals, details;
+                        if (SAMPLING.enabled) {
+                            const averaged = await computeAveragedDepth(pair, SAMPLING.retrySamples, SAMPLING.intervalMs);
+                            mid = averaged.mid;
+                            totals = averaged.totals;
+                            details = {
+                                0.5: { bidNotional: averaged.bandTotals[0.5].bid, askNotional: averaged.bandTotals[0.5].ask },
+                                1.0: { bidNotional: averaged.bandTotals[1.0].bid, askNotional: averaged.bandTotals[1.0].ask },
+                                2.0: { bidNotional: averaged.bandTotals[2.0].bid, askNotional: averaged.bandTotals[2.0].ask },
+                                5.0: { bidNotional: averaged.bandTotals[5.0].bid, askNotional: averaged.bandTotals[5.0].ask }
+                            };
+                        } else {
+                            const obUrl = joinUrl(BASE_URL, ORDERBOOK_PATH_TMPL.replace('{market}', encodeURIComponent(pair)));
+                            const ob = await fetchJson(obUrl);
+                            const bids = Array.isArray(ob.bids) ? ob.bids : [];
+                            const asks = Array.isArray(ob.asks) ? ob.asks : [];
+                            mid = computeMid(bids, asks);
+                            totals = {};
+                            details = {};
+                            for (const pct of BANDS) {
+                                const depth = accumulateDepth(bids, asks, mid, pct / 100);
+                                totals[pct] = depth.total;
+                                details[pct] = depth;
+                            }
                         }
                         const entry = cachedData.find(e => e.pair === pair);
                         if (entry) {
@@ -617,6 +711,7 @@
                 // Keep accordion state collapsed by default after re-render
             }
         });
+        renderSamplingInfo();
         loadData();
             </script>
         </body>
