@@ -39,9 +39,18 @@
         .ask { color: #7ee787; }
         .group-row td { background: #0b0e13; border-bottom: 1px solid #222836; color: #a6aeb9; font-weight: 600; font-size: 13px; padding-top: 16px; }
         .group-sub { color: #8b949e; font-weight: 400; font-size: 12px; margin-left: 8px; }
+        .gh-repo-link { position: fixed; top: 20px; right: 20px; z-index: 1000; display: inline-flex; align-items: center; gap: 8px; color: #a6aeb9; text-decoration: none; opacity: .85; padding: 6px 10px; border: 1px solid #2a2f3b; border-radius: 8px; background: #0f1115; }
+        .gh-repo-link:hover { opacity: 1; background: #151921; }
+        .gh-repo-link svg { width: 18px; height: 18px; fill: currentColor; }
             </style>
         </head>
         <body>
+            <a class="gh-repo-link" href="https://github.com/Pocket-Protector/pairDepth-dYdX" target="_blank" rel="noopener noreferrer" title="Open GitHub repository">
+                <svg viewBox="0 0 16 16" aria-hidden="true">
+                    <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.01.08-2.11 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.91.08 2.11.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.19 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8Z"></path>
+                </svg>
+                <span>GitHub</span>
+            </a>
             <h1>dYdX Liquidity Analysis</h1>
     <div class="controls">
         <div class="left-controls" style="display:flex;gap:12px;align-items:center;">
@@ -134,6 +143,24 @@
                 notation: 'standard'
             };
             return new Intl.NumberFormat(undefined, opts).format(num);
+        }
+
+        function makeDepthTooltip(pair, mid, pct, bandTotals) {
+            if (!Number.isFinite(mid)) return '';
+            const lower = mid * (1 - pct / 100);
+            const upper = mid * (1 + pct / 100);
+            const parts = [];
+            parts.push(`${pair} ${pct}% price band`);
+            parts.push(`Mid: ${fmtUsdMid(mid)}`);
+            parts.push(`Range: ${fmtUsdMid(lower)} – ${fmtUsdMid(upper)}`);
+            if (bandTotals && bandTotals[pct]) {
+                const bid = Number(bandTotals[pct].bid);
+                const ask = Number(bandTotals[pct].ask);
+                if (Number.isFinite(bid) || Number.isFinite(ask)) {
+                    parts.push(`Notional within band → bids: ${fmtUsd(bid || 0)}, asks: ${fmtUsd(ask || 0)}`);
+                }
+            }
+            return parts.join('\n');
         }
 
         function joinUrl(base, path) {
@@ -240,7 +267,7 @@
             return { mid, totals, bandTotals };
         }
 
-        function makeMainRow(pair, mid, totals, volume24h, oiUsd) {
+        function makeMainRow(pair, mid, totals, volume24h, oiUsd, bandTotals) {
             const tr = document.createElement('tr');
             tr.className = 'main-row market-row';
             tr.dataset.pair = pair;
@@ -262,6 +289,14 @@
                 <td class="right">${fmtUsd(totals[2.0])}</td>
                 <td class="right">${fmtUsd(totals[5.0])}</td>
             `;
+            // Attach hover tooltips to depth cells with price range and notional info
+            const tds = tr.querySelectorAll('td');
+            if (tds && tds.length >= 8) {
+                tds[4].title = makeDepthTooltip(pair, Number(mid), 0.5, bandTotals);
+                tds[5].title = makeDepthTooltip(pair, Number(mid), 1.0, bandTotals);
+                tds[6].title = makeDepthTooltip(pair, Number(mid), 2.0, bandTotals);
+                tds[7].title = makeDepthTooltip(pair, Number(mid), 5.0, bandTotals);
+            }
             return tr;
         }
 
@@ -348,7 +383,7 @@
             const tbody = document.getElementById('tableBody');
             tbody.innerHTML = '';
             data.forEach(item => {
-                const mainRow = makeMainRow(item.pair, item.mid, item.totals, item.volume24h, item.oiUsd);
+                const mainRow = makeMainRow(item.pair, item.mid, item.totals, item.volume24h, item.oiUsd, item.bandTotals);
                 if (item.group) mainRow.dataset.group = item.group;
                 tbody.appendChild(mainRow);
                 const subRow = makeTotalsSubRow(item.pair, item.bandTotals);
@@ -359,7 +394,7 @@
 
         function appendRow(item) {
             const tbody = document.getElementById('tableBody');
-            const mainRow = makeMainRow(item.pair, item.mid, item.totals, item.volume24h, item.oiUsd);
+            const mainRow = makeMainRow(item.pair, item.mid, item.totals, item.volume24h, item.oiUsd, item.bandTotals);
             if (item.group) mainRow.dataset.group = item.group;
             tbody.appendChild(mainRow);
             const subRow = makeTotalsSubRow(item.pair, item.bandTotals);
@@ -413,7 +448,7 @@
                     });
                 }
                 for (const it of items) {
-                    const mainRow = makeMainRow(it.pair, it.mid, it.totals, it.volume24h, it.oiUsd);
+                    const mainRow = makeMainRow(it.pair, it.mid, it.totals, it.volume24h, it.oiUsd, it.bandTotals);
                     mainRow.dataset.group = g;
                     tbody.appendChild(mainRow);
                     const subRow = makeTotalsSubRow(it.pair, it.bandTotals);
@@ -654,6 +689,11 @@
             mainRow.children[5].innerHTML = fmtUsd(entry.totals[1.0]);
             mainRow.children[6].innerHTML = fmtUsd(entry.totals[2.0]);
             mainRow.children[7].innerHTML = fmtUsd(entry.totals[5.0]);
+            // Update hover tooltips on depth cells
+            mainRow.children[4].title = makeDepthTooltip(pair, Number(entry.mid), 0.5, entry.bandTotals);
+            mainRow.children[5].title = makeDepthTooltip(pair, Number(entry.mid), 1.0, entry.bandTotals);
+            mainRow.children[6].title = makeDepthTooltip(pair, Number(entry.mid), 2.0, entry.bandTotals);
+            mainRow.children[7].title = makeDepthTooltip(pair, Number(entry.mid), 5.0, entry.bandTotals);
             subRow.children[2].querySelector('.ask').textContent = fmtUsd(entry.bandTotals[0.5].ask);
             subRow.children[2].querySelector('.bid').textContent = fmtUsd(entry.bandTotals[0.5].bid);
             subRow.children[3].querySelector('.ask').textContent = fmtUsd(entry.bandTotals[1.0].ask);
