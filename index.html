@@ -70,10 +70,6 @@
     </div>
     <div class="summary" id="summaryBar">
         <div class="summary-item" id="sumMarkets">Total markets: -</div>
-        <div class="summary-item" id="sumDepth05">Total 0.5% depth: -</div>
-        <div class="summary-item" id="sumDepth1">Total 1% depth: -</div>
-        <div class="summary-item" id="sumDepth2">Total 2% depth: -</div>
-        <div class="summary-item" id="sumDepth5">Total 5% depth: -</div>
     </div>
     <div class="muted" style="margin-bottom:8px;">Filters: excluding inactive (FINAL_SETTLEMENT) and low-volume markets (24h volume < $1,000).</div>
     <div class="muted" id="samplingInfo" style="margin-bottom:8px;"></div>
@@ -81,16 +77,7 @@
     <div id="error" class="error" style="display:none;"></div>
             <table>
                 <thead>
-                    <tr>
-                <th class="sortable" data-column="ticker">Ticker</th>
-                <th class="sortable right" data-column="volume24h">24h Volume</th>
-                <th class="sortable right" data-column="oiUsd">Open Interest (USD)</th>
-                <th class="sortable right" data-column="mid">Mid Price</th>
-                <th class="sortable right" data-column="depth0.5">0.5% Depth</th>
-                <th class="sortable right" data-column="depth1">1% Depth</th>
-                <th class="sortable right" data-column="depth2">2% Depth</th>
-                <th class="sortable right" data-column="depth5">5% Depth</th>
-                    </tr>
+                    <tr id="headerRow"></tr>
                 </thead>
         <tbody id="tableBody"></tbody>
     </table>
@@ -98,7 +85,21 @@
         const BASE_URL = 'https://indexer.dydx.trade/v4';
         const MARKETS_PATH = '/perpetualMarkets';
         const ORDERBOOK_PATH_TMPL = '/orderbooks/perpetualMarket/{market}';
-        const BANDS = [0.5, 1.0, 2.0, 5.0];
+        // Depth columns to display (in %), plus a full-depth column
+        const DEPTH_BANDS = [
+            { key: '0.08', pct: 0.08 },
+            { key: '0.10', pct: 0.10 },
+            { key: '0.12', pct: 0.12 },
+            { key: '0.15', pct: 0.15 },
+            { key: '0.20', pct: 0.20 },
+            { key: '0.25', pct: 0.25 },
+            { key: '0.30', pct: 0.30 },
+            { key: '0.50', pct: 0.50 },
+            { key: '0.75', pct: 0.75 },
+            { key: '1.00', pct: 1.00 },
+            { key: '5.00', pct: 5.00 },
+            { key: 'full', pct: null }
+        ];
 
         // Sampling configuration to stabilize depth estimates
         const SAMPLING = {
@@ -177,6 +178,28 @@
             }
         }
 
+        function columnCount() {
+            return 4 + DEPTH_BANDS.length; // Ticker, 24h Vol, OI, Mid + depth columns
+        }
+
+        function buildTableHeader() {
+            const headerRow = document.getElementById('headerRow');
+            if (!headerRow) return;
+            const cells = [];
+            cells.push('<th class="sortable" data-column="ticker">Ticker</th>');
+            cells.push('<th class="sortable right" data-column="volume24h">24h Volume</th>');
+            cells.push('<th class="sortable right" data-column="oiUsd">Open Interest (USD)</th>');
+            cells.push('<th class="sortable right" data-column="mid">Mid Price</th>');
+            for (const spec of DEPTH_BANDS) {
+                if (spec.pct === null) {
+                    cells.push('<th class="sortable right" data-column="depth-full">Full Depth</th>');
+                } else {
+                    cells.push(`<th class="sortable right" data-column="depth-${spec.key}">${spec.key}% Depth</th>`);
+                }
+            }
+            headerRow.innerHTML = cells.join('');
+        }
+
         async function fetchJson(url) {
             const res = await fetch(url, { method: 'GET' });
             if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
@@ -217,14 +240,42 @@
 
         function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
+        function computeBandTotals(bids, asks, mid) {
+            const totals = {};
+            const bandTotals = {};
+            for (const spec of DEPTH_BANDS) {
+                if (spec.pct === null) {
+                    let bidNotional = 0;
+                    let askNotional = 0;
+                    for (const b of bids) {
+                        const price = Number(b.price);
+                        const size = Number(b.size);
+                        if (Number.isFinite(price) && Number.isFinite(size)) bidNotional += price * size;
+                    }
+                    for (const a of asks) {
+                        const price = Number(a.price);
+                        const size = Number(a.size);
+                        if (Number.isFinite(price) && Number.isFinite(size)) askNotional += price * size;
+                    }
+                    totals[spec.key] = bidNotional + askNotional;
+                    bandTotals[spec.key] = { bid: bidNotional, ask: askNotional };
+                } else {
+                    const depth = accumulateDepth(bids, asks, mid, spec.pct / 100);
+                    totals[spec.key] = depth.total;
+                    bandTotals[spec.key] = { bid: depth.bidNotional, ask: depth.askNotional };
+                }
+            }
+            return { totals, bandTotals };
+        }
+
         async function computeAveragedDepth(pair, samples, intervalMs) {
             const totalsSum = {};
             const bidsSum = {};
             const asksSum = {};
-            for (const pct of BANDS) {
-                totalsSum[pct] = 0;
-                bidsSum[pct] = 0;
-                asksSum[pct] = 0;
+            for (const spec of DEPTH_BANDS) {
+                totalsSum[spec.key] = 0;
+                bidsSum[spec.key] = 0;
+                asksSum[spec.key] = 0;
             }
 
             let midSum = 0;
@@ -242,11 +293,12 @@
                     } else {
                         ok += 1;
                         midSum += mid;
-                        for (const pct of BANDS) {
-                            const depth = accumulateDepth(bids, asks, mid, pct / 100);
-                            totalsSum[pct] += depth.total;
-                            bidsSum[pct] += depth.bidNotional;
-                            asksSum[pct] += depth.askNotional;
+                        const { totals, bandTotals } = computeBandTotals(bids, asks, mid);
+                        for (const spec of DEPTH_BANDS) {
+                            const k = spec.key;
+                            totalsSum[k] += totals[k];
+                            bidsSum[k] += bandTotals[k].bid;
+                            asksSum[k] += bandTotals[k].ask;
                         }
                     }
                 } catch (_) {
@@ -260,9 +312,10 @@
             const mid = midSum / ok;
             const totals = {};
             const bandTotals = {};
-            for (const pct of BANDS) {
-                totals[pct] = totalsSum[pct] / ok;
-                bandTotals[pct] = { ask: asksSum[pct] / ok, bid: bidsSum[pct] / ok };
+            for (const spec of DEPTH_BANDS) {
+                const k = spec.key;
+                totals[k] = totalsSum[k] / ok;
+                bandTotals[k] = { ask: asksSum[k] / ok, bid: bidsSum[k] / ok };
             }
             return { mid, totals, bandTotals };
         }
@@ -272,30 +325,30 @@
             tr.className = 'main-row market-row';
             tr.dataset.pair = pair;
             tr.dataset.mid = mid;
-            tr.dataset.depth05 = totals[0.5];
-            tr.dataset.depth1 = totals[1.0];
-            tr.dataset.depth2 = totals[2.0];
-            tr.dataset.depth5 = totals[5.0];
             tr.dataset.volume24h = volume24h || 0;
             tr.dataset.oiUsd = oiUsd || 0;
             tr.onclick = () => toggleDetails(pair, tr);
-            tr.innerHTML = `
-                <td><span class="pair"><span class="caret"></span><strong>${pair}</strong></span></td>
-                <td class="right">${fmtUsd(volume24h)}</td>
-                <td class="right">${fmtUsd(oiUsd)}</td>
-                <td class="right">${fmtUsdMid(mid)}</td>
-                <td class="right">${fmtUsd(totals[0.5])}</td>
-                <td class="right">${fmtUsd(totals[1.0])}</td>
-                <td class="right">${fmtUsd(totals[2.0])}</td>
-                <td class="right">${fmtUsd(totals[5.0])}</td>
-            `;
+            const cells = [];
+            cells.push(`<td><span class="pair"><span class="caret"></span><strong>${pair}</strong></span></td>`);
+            cells.push(`<td class="right">${fmtUsd(volume24h)}</td>`);
+            cells.push(`<td class="right">${fmtUsd(oiUsd)}</td>`);
+            cells.push(`<td class="right">${fmtUsdMid(mid)}</td>`);
+            for (const spec of DEPTH_BANDS) {
+                cells.push(`<td class="right">${fmtUsd(totals[spec.key])}</td>`);
+            }
+            tr.innerHTML = cells.join('');
             // Attach hover tooltips to depth cells with price range and notional info
             const tds = tr.querySelectorAll('td');
-            if (tds && tds.length >= 8) {
-                tds[4].title = makeDepthTooltip(pair, Number(mid), 0.5, bandTotals);
-                tds[5].title = makeDepthTooltip(pair, Number(mid), 1.0, bandTotals);
-                tds[6].title = makeDepthTooltip(pair, Number(mid), 2.0, bandTotals);
-                tds[7].title = makeDepthTooltip(pair, Number(mid), 5.0, bandTotals);
+            if (tds && tds.length >= 4 + DEPTH_BANDS.length) {
+                for (let i = 0; i < DEPTH_BANDS.length; i++) {
+                    const spec = DEPTH_BANDS[i];
+                    const cell = tds[4 + i];
+                    if (spec.pct !== null) {
+                        cell.title = makeDepthTooltip(pair, Number(mid), spec.pct, bandTotals);
+                    } else {
+                        cell.title = '';
+                    }
+                }
             }
             return tr;
         }
@@ -304,59 +357,28 @@
             const tr = document.createElement('tr');
             tr.className = 'sub-row market-row';
             tr.id = `details-${pair}`;
-            tr.innerHTML = `
-                <td></td>
-                <td></td>
-                <td></td>
+            const parts = [];
+            parts.push('<td></td>'); // ticker
+            parts.push('<td></td>'); // volume
+            parts.push('<td></td>'); // oi
+            parts.push('<td></td>'); // mid
+            for (const spec of DEPTH_BANDS) {
+                const k = spec.key;
+                parts.push(`
                 <td>
                     <div class="depth-breakdown">
                         <div class="depth-item">
                             <span class="depth-item-label">asks</span>
-                            <span class="depth-item-value ask">${fmtUsd(totals[0.5].ask)}</span>
-                                    </div>
+                            <span class="depth-item-value ask">${fmtUsd((totals[k] || {}).ask)}</span>
+                        </div>
                         <div class="depth-item">
                             <span class="depth-item-label">bids</span>
-                            <span class="depth-item-value bid">${fmtUsd(totals[0.5].bid)}</span>
-                                </div>
-                            </div>
-                        </td>
-                <td>
-                    <div class="depth-breakdown">
-                        <div class="depth-item">
-                            <span class="depth-item-label">asks</span>
-                            <span class="depth-item-value ask">${fmtUsd(totals[1.0].ask)}</span>
-                                    </div>
-                        <div class="depth-item">
-                            <span class="depth-item-label">bids</span>
-                            <span class="depth-item-value bid">${fmtUsd(totals[1.0].bid)}</span>
-                                </div>
-                            </div>
-                        </td>
-                <td>
-                    <div class="depth-breakdown">
-                        <div class="depth-item">
-                            <span class="depth-item-label">asks</span>
-                            <span class="depth-item-value ask">${fmtUsd(totals[2.0].ask)}</span>
-                                    </div>
-                        <div class="depth-item">
-                            <span class="depth-item-label">bids</span>
-                            <span class="depth-item-value bid">${fmtUsd(totals[2.0].bid)}</span>
-                                </div>
-                            </div>
-                        </td>
-                <td>
-                    <div class="depth-breakdown">
-                        <div class="depth-item">
-                            <span class="depth-item-label">asks</span>
-                            <span class="depth-item-value ask">${fmtUsd(totals[5.0].ask)}</span>
-                                    </div>
-                        <div class="depth-item">
-                            <span class="depth-item-label">bids</span>
-                            <span class="depth-item-value bid">${fmtUsd(totals[5.0].bid)}</span>
-                                </div>
-                            </div>
-                        </td>
-            `;
+                            <span class="depth-item-value bid">${fmtUsd((totals[k] || {}).bid)}</span>
+                        </div>
+                    </div>
+                </td>`);
+            }
+            tr.innerHTML = parts.join('');
             return tr;
         }
 
@@ -404,7 +426,7 @@
         function makeGroupHeader(title, subtitle) {
             const tr = document.createElement('tr');
             tr.className = 'group-row';
-            tr.innerHTML = `<td colspan="8">${title} <span class="group-sub">${subtitle}</span></td>`;
+            tr.innerHTML = `<td colspan="${columnCount()}">${title} <span class="group-sub">${subtitle}</span></td>`;
             return tr;
         }
 
@@ -426,11 +448,12 @@
                     case 'volume24h': return Number(it.volume24h || 0);
                     case 'oiUsd': return Number(it.oiUsd || 0);
                     case 'mid': return Number(it.mid || 0);
-                    case 'depth0.5': return Number(it.totals[0.5] || 0);
-                    case 'depth1': return Number(it.totals[1.0] || 0);
-                    case 'depth2': return Number(it.totals[2.0] || 0);
-                    case 'depth5': return Number(it.totals[5.0] || 0);
-                    default: return 0;
+                    default:
+                        if (String(sortState.column || '').startsWith('depth-')) {
+                            const key = String(sortState.column).slice(6);
+                            return Number((it.totals || {})[key] || 0);
+                        }
+                        return 0;
                 }
             };
 
@@ -464,18 +487,9 @@
         }
 
         function updateSummary(data) {
-            const totals = { m: data.length, d05: 0, d1: 0, d2: 0, d5: 0 };
-            for (const it of data) {
-                totals.d05 += Number(it.totals[0.5] || 0);
-                totals.d1 += Number(it.totals[1.0] || 0);
-                totals.d2 += Number(it.totals[2.0] || 0);
-                totals.d5 += Number(it.totals[5.0] || 0);
-            }
-            document.getElementById('sumMarkets').textContent = `Total markets: ${totals.m}`;
-            document.getElementById('sumDepth05').textContent = `Total 0.5% depth: ${fmtUsd(totals.d05)}`;
-            document.getElementById('sumDepth1').textContent = `Total 1% depth: ${fmtUsd(totals.d1)}`;
-            document.getElementById('sumDepth2').textContent = `Total 2% depth: ${fmtUsd(totals.d2)}`;
-            document.getElementById('sumDepth5').textContent = `Total 5% depth: ${fmtUsd(totals.d5)}`;
+            const totals = { m: data.length };
+            const elM = document.getElementById('sumMarkets');
+            if (elM) elM.textContent = `Total markets: ${totals.m}`;
         }
 
         async function loadData() {
@@ -541,36 +555,27 @@
                         document.getElementById('tableBody').appendChild(makeGroupHeader(title, subtitle));
                         insertedGroups.add(group);
                     }
-                    let mid, totals, details;
+                    let mid, totals, bandTotals;
                     try {
                         if (SAMPLING.enabled) {
                             const averaged = await computeAveragedDepth(pair, SAMPLING.samples, SAMPLING.intervalMs);
                             mid = averaged.mid;
                             totals = averaged.totals;
-                            details = {
-                                0.5: { bidNotional: averaged.bandTotals[0.5].bid, askNotional: averaged.bandTotals[0.5].ask },
-                                1.0: { bidNotional: averaged.bandTotals[1.0].bid, askNotional: averaged.bandTotals[1.0].ask },
-                                2.0: { bidNotional: averaged.bandTotals[2.0].bid, askNotional: averaged.bandTotals[2.0].ask },
-                                5.0: { bidNotional: averaged.bandTotals[5.0].bid, askNotional: averaged.bandTotals[5.0].ask }
-                            };
+                            bandTotals = averaged.bandTotals;
                         } else {
                             const obUrl = joinUrl(BASE_URL, ORDERBOOK_PATH_TMPL.replace('{market}', encodeURIComponent(pair)));
                             const ob = await fetchJson(obUrl);
                             const bids = Array.isArray(ob.bids) ? ob.bids : [];
                             const asks = Array.isArray(ob.asks) ? ob.asks : [];
                             mid = computeMid(bids, asks);
-                            totals = {};
-                            details = {};
-                            for (const pct of BANDS) {
-                                const depth = accumulateDepth(bids, asks, mid, pct / 100);
-                                totals[pct] = depth.total;
-                                details[pct] = depth;
-                            }
+                            const comp = computeBandTotals(bids, asks, mid);
+                            totals = comp.totals;
+                            bandTotals = comp.bandTotals;
                         }
                     } catch (e) {
                         const tr = document.createElement('tr');
                         tr.className = 'main-row market-row';
-                        tr.innerHTML = `<td><strong>${pair}</strong></td><td colspan="5" class="muted">Orderbook error</td>`;
+                        tr.innerHTML = `<td><strong>${pair}</strong></td><td colspan="${columnCount() - 1}" class="muted">Orderbook error</td>`;
                         tbody.appendChild(tr);
                         continue;
                     }
@@ -584,12 +589,7 @@
                         totals,
                         volume24h,
                         oiUsd,
-                        bandTotals: {
-                        0.5: { ask: details[0.5].askNotional, bid: details[0.5].bidNotional },
-                        1.0: { ask: details[1.0].askNotional, bid: details[1.0].bidNotional },
-                        2.0: { ask: details[2.0].askNotional, bid: details[2.0].bidNotional },
-                        5.0: { ask: details[5.0].askNotional, bid: details[5.0].bidNotional }
-                        },
+                        bandTotals,
                         group
                     };
                     cachedData.push(entry);
@@ -622,41 +622,27 @@
                 let done = 0;
                 for (const pair of tickers) {
                     try {
-                        let mid, totals, details;
+                        let mid, totals, bandTotals;
                         if (SAMPLING.enabled) {
                             const averaged = await computeAveragedDepth(pair, SAMPLING.retrySamples, SAMPLING.intervalMs);
                             mid = averaged.mid;
                             totals = averaged.totals;
-                            details = {
-                                0.5: { bidNotional: averaged.bandTotals[0.5].bid, askNotional: averaged.bandTotals[0.5].ask },
-                                1.0: { bidNotional: averaged.bandTotals[1.0].bid, askNotional: averaged.bandTotals[1.0].ask },
-                                2.0: { bidNotional: averaged.bandTotals[2.0].bid, askNotional: averaged.bandTotals[2.0].ask },
-                                5.0: { bidNotional: averaged.bandTotals[5.0].bid, askNotional: averaged.bandTotals[5.0].ask }
-                            };
+                            bandTotals = averaged.bandTotals;
                         } else {
                             const obUrl = joinUrl(BASE_URL, ORDERBOOK_PATH_TMPL.replace('{market}', encodeURIComponent(pair)));
                             const ob = await fetchJson(obUrl);
                             const bids = Array.isArray(ob.bids) ? ob.bids : [];
                             const asks = Array.isArray(ob.asks) ? ob.asks : [];
                             mid = computeMid(bids, asks);
-                            totals = {};
-                            details = {};
-                            for (const pct of BANDS) {
-                                const depth = accumulateDepth(bids, asks, mid, pct / 100);
-                                totals[pct] = depth.total;
-                                details[pct] = depth;
-                            }
+                            const comp = computeBandTotals(bids, asks, mid);
+                            totals = comp.totals;
+                            bandTotals = comp.bandTotals;
                         }
                         const entry = cachedData.find(e => e.pair === pair);
                         if (entry) {
                             entry.mid = mid;
                             entry.totals = totals;
-                            entry.bandTotals = {
-                                0.5: { ask: details[0.5].askNotional, bid: details[0.5].bidNotional },
-                                1.0: { ask: details[1.0].askNotional, bid: details[1.0].bidNotional },
-                                2.0: { ask: details[2.0].askNotional, bid: details[2.0].bidNotional },
-                                5.0: { ask: details[5.0].askNotional, bid: details[5.0].bidNotional }
-                            };
+                            entry.bandTotals = bandTotals;
                             updateRow(pair, entry);
                         }
                         const allZero = Object.values(totals).every(v => Number(v) === 0);
@@ -676,32 +662,11 @@
             const mainRow = document.querySelector(`tr.main-row[data-pair="${pair}"]`);
             const subRow = document.getElementById(`details-${pair}`);
             if (!mainRow || !subRow) return;
-            mainRow.dataset.mid = entry.mid;
-            mainRow.dataset.depth05 = entry.totals[0.5];
-            mainRow.dataset.depth1 = entry.totals[1.0];
-            mainRow.dataset.depth2 = entry.totals[2.0];
-            mainRow.dataset.depth5 = entry.totals[5.0];
-            // children: [ticker, volume24h, oiUsd, mid, 0.5, 1, 2, 5]
-            mainRow.children[1].innerHTML = fmtUsd(entry.volume24h);
-            mainRow.children[2].innerHTML = fmtUsd(entry.oiUsd);
-            mainRow.children[3].innerHTML = fmtUsdMid(entry.mid);
-            mainRow.children[4].innerHTML = fmtUsd(entry.totals[0.5]);
-            mainRow.children[5].innerHTML = fmtUsd(entry.totals[1.0]);
-            mainRow.children[6].innerHTML = fmtUsd(entry.totals[2.0]);
-            mainRow.children[7].innerHTML = fmtUsd(entry.totals[5.0]);
-            // Update hover tooltips on depth cells
-            mainRow.children[4].title = makeDepthTooltip(pair, Number(entry.mid), 0.5, entry.bandTotals);
-            mainRow.children[5].title = makeDepthTooltip(pair, Number(entry.mid), 1.0, entry.bandTotals);
-            mainRow.children[6].title = makeDepthTooltip(pair, Number(entry.mid), 2.0, entry.bandTotals);
-            mainRow.children[7].title = makeDepthTooltip(pair, Number(entry.mid), 5.0, entry.bandTotals);
-            subRow.children[2].querySelector('.ask').textContent = fmtUsd(entry.bandTotals[0.5].ask);
-            subRow.children[2].querySelector('.bid').textContent = fmtUsd(entry.bandTotals[0.5].bid);
-            subRow.children[3].querySelector('.ask').textContent = fmtUsd(entry.bandTotals[1.0].ask);
-            subRow.children[3].querySelector('.bid').textContent = fmtUsd(entry.bandTotals[1.0].bid);
-            subRow.children[4].querySelector('.ask').textContent = fmtUsd(entry.bandTotals[2.0].ask);
-            subRow.children[4].querySelector('.bid').textContent = fmtUsd(entry.bandTotals[2.0].bid);
-            subRow.children[5].querySelector('.ask').textContent = fmtUsd(entry.bandTotals[5.0].ask);
-            subRow.children[5].querySelector('.bid').textContent = fmtUsd(entry.bandTotals[5.0].bid);
+            const newMain = makeMainRow(entry.pair, entry.mid, entry.totals, entry.volume24h, entry.oiUsd, entry.bandTotals);
+            if (mainRow.dataset.group) newMain.dataset.group = mainRow.dataset.group;
+            mainRow.replaceWith(newMain);
+            const newSub = makeTotalsSubRow(entry.pair, entry.bandTotals);
+            subRow.replaceWith(newSub);
         }
 
         let sortState = { column: null, direction: 'asc' };
@@ -734,6 +699,7 @@
             });
         }
 
+        buildTableHeader();
         document.querySelectorAll('thead th.sortable').forEach(th => {
             th.addEventListener('click', () => {
                 const column = th.dataset.column;
